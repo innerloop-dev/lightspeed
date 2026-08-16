@@ -1,0 +1,32 @@
+# What ships inside an application's vendor/ directory.
+#
+# example/ is a whole generated Laravel app plus its stubs, and logo.png is
+# over a megabyte. Neither has any business being downloaded by every project
+# that installs this package.
+#
+# composer.lock is deliberately absent from this list: it is gitignored, so it
+# is not in the repository and cannot be in the archive. A line for it here
+# would claim to exclude something that never shipped.
+#
+# AGENTS.md and CONTRIBUTING.md are written for someone changing this package,
+# not for someone using it.
+#
+# tests/ deliberately DOES ship. docs/verifying.md tells operators to run
+# `php vendor/innerloop-dev/lightspeed/tests/integration/...` against their own
+# running server, and a check you cannot run where the problem is happening is
+# not much of a check.
+#
+# deploy/ deliberately ships too, for the same reason at one remove: docs/ ships,
+# and docs/PRODUCTION.md and docs/configuration.md point operators at
+# `../deploy/nginx` and `../deploy/systemd` by relative path. Ignoring three
+# small text files would turn those links into dead ends for anyone reading the
+# docs where they installed them.
+
+example/           export-ignore
+logo.png           export-ignore
+.github/           export-ignore
+.gitattributes     export-ignore
+.gitignore         export-ignore
+phpunit.xml        export-ignore
+AGENTS.md          export-ignore
+CONTRIBUTING.md    export-ignore

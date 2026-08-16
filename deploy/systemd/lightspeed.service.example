@@ -1,0 +1,22 @@
+[Unit]
+Description=Lightspeed Runtime
+After=network.target redis.service
+Requires=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/example-app
+Environment=APP_ENV=production
+Environment=LIGHTSPEED_PID_FILE=/var/www/example-app/storage/framework/lightspeed-prod.pid
+Environment=LIGHTSPEED_LOG_FILE=/var/www/example-app/storage/logs/lightspeed-prod.log
+ExecStart=/usr/bin/php artisan lightspeed:serve --workers=8 --relay=1 --instance-id=%H-lightspeed
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

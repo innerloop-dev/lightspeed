@@ -1,0 +1,69 @@
+{
+    "name": "innerloop-dev/lightspeed",
+    "description": "Swoole-based, Pusher-compatible realtime server for Laravel with multi-worker relay, shared presence, per-resource write leases, and multi-instance owner routing.",
+    "type": "library",
+    "license": "MIT",
+    "support": {
+        "issues": "https://github.com/innerloop-dev/lightspeed/issues",
+        "source": "https://github.com/innerloop-dev/lightspeed",
+        "security": "https://github.com/innerloop-dev/lightspeed/security"
+    },
+    "keywords": [
+        "laravel",
+        "websockets",
+        "realtime",
+        "swoole",
+        "pusher",
+        "broadcasting"
+    ],
+    "homepage": "https://github.com/innerloop-dev/lightspeed",
+    "authors": [
+        {
+            "name": "Justin Vincent"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "ext-swoole": "*",
+        "laravel/framework": "^11.0|^12.0",
+        "laravel/octane": "^2.4|^3.0",
+        "pusher/pusher-php-server": "^7.2"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^3.0",
+        "pestphp/pest-plugin-mutate": "^3.0"
+    },
+    "suggest": {
+        "predis/predis": "Pure-PHP Redis client for the relay, presence, and owner-command streams (ext-redis works too)."
+    },
+    "autoload": {
+        "psr-4": {
+            "Lightspeed\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Lightspeed\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "test:mutate": "pest --mutate --everything --covered-only --parallel"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "infection/extension-installer": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Lightspeed\\LightspeedServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

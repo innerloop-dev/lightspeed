@@ -1,0 +1,88 @@
+upstream app_http {
+    server 127.0.0.1:8000;
+    keepalive 64;
+}
+
+upstream lightspeed_realtime {
+    server 127.0.0.1:8080;
+    keepalive 64;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name app.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/app.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/app.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://app_http;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_read_timeout 120s;
+    }
+
+    location = /up {
+        proxy_pass http://app_http;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name realtime.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/realtime.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/realtime.example.com/privkey.pem;
+
+    # Only the Pusher websocket path is exposed, deliberately. Every other
+    # websocket path on this server belongs to the local diagnostic protocol,
+    # which performs no channel authorization. Proxying it would make the
+    # server see nginx's loopback address for a request that came from the
+    # internet, handing an anonymous client a bus onto every channel.
+    location /app/ {
+        proxy_pass http://lightspeed_realtime;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # The signed publish endpoint (the Pusher HTTP API).
+    location /apps/ {
+        proxy_pass http://lightspeed_realtime;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # The load balancer's probe target, and it is meant to be reachable: see
+    # SECURITY.md for exactly what it answers. The only detail it ever gives
+    # away is the reason a broken worker is unhealthy, which can name the
+    # internal address it could not reach. To keep that off the internet, allow
+    # only your probe's network here (`allow 10.0.0.0/8; deny all;`).
+    location = /healthz {
+        proxy_pass http://lightspeed_realtime/healthz;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location / {
+        return 404;
+    }
+}
