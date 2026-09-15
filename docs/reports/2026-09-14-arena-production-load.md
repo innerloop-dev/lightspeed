@@ -13,8 +13,10 @@ frame to every socket, while clients send input back up at 30Hz.
 
 ## What was measured, and on what
 
-The box is the production host for innerloop.works: Hetzner, 8 cores, 32GB,
-Ubuntu, nginx in front of `lightspeed:serve`, Redis local.
+The box is the production host for innerloop.works: a Hetzner Cloud CCX33
+(dedicated vCPU), 8 vCPU, 32 GB RAM, 240 GB local disk, in Hillsboro, Oregon
+(us-west), with 3 TB/month outbound included, managed by Laravel Forge. Ubuntu,
+nginx in front of `lightspeed:serve`, Redis local.
 
 The application is the arena, which is the app's code, not the package's:
 
@@ -33,6 +35,11 @@ pure Node websocket bots speaking the real wire protocol, with no browser in
 them: session cookie, placement, Pusher handshake, presence auth, and client
 events at 30Hz. Server-side figures were read from the application's own
 `arena-world-metrics.log` and from `top` over the same window.
+
+The clients are two machines, a Mac mini and a MacBook Pro, connected from Los
+Angeles over a residential connection, roughly 1,500km from the Hillsboro box.
+Every round-trip number below therefore includes real internet distance, not a
+LAN.
 
 ## The runs
 
