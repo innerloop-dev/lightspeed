@@ -28,6 +28,20 @@ use Swoole\WebSocket\Server;
  *          ▲                          dispatch to handler
  *          └───────── SETEX response  release lease (finally)
  *
+ * Or they do not wait, which is the other half of this class. send() writes the
+ * same signed entry and returns; the owner runs it and writes nothing back:
+ *
+ *   caller worker                     owning worker
+ *   ─────────────                     ─────────────
+ *   XADD command  ──────────────────> drain (timer tick)
+ *   return                            dispatch to handler
+ *
+ * The two paths differ in what the caller is promised, never in what the owner
+ * is willing to execute: both entries are signed, addressed, bounded by the
+ * freshness window and spendable once. A sent command takes no write lease,
+ * because a lease can refuse and a refusal has no caller left to reach; see
+ * send() and executeCommand().
+ *
  * What the write lease actually guarantees, and its bound:
  *
  * The lease is a single Redis key with a fixed TTL
@@ -217,18 +231,153 @@ class OwnerCommandBus
             return null;
         }
 
+        $targetProcessKey = $this->remoteOwner($resourceId, $reason)['target_process_key'];
+
+        // Local ownership and an owner nobody could resolve are the same answer
+        // here, and always have been: there is no other process to forward to,
+        // so the caller handles the work itself.
+        if ($targetProcessKey === null) {
+            return null;
+        }
+
+        $requestId = $this->appendCommand($targetProcessKey, $resourceId, $command, $payload, expectsReply: true);
+
+        return $this->waitForResponse($requestId);
+    }
+
+    /**
+     * Deliver a command to the owning worker without waiting for an answer.
+     *
+     * The forwarding path above is synchronous by construction: it writes the
+     * command and then polls a response key, and with `enable_coroutine` off
+     * that poll is a usleep() on the single event loop serving every connection
+     * this worker holds. For a mutation whose result the caller needs, that cost
+     * buys something. For a STREAM of commands that needs no result — input
+     * frames, telemetry, anything whose only requirement is that the owner
+     * applies it in order — it buys nothing and spends the worker's loop on it.
+     *
+     *   send() ─ local owner ──> dispatch to the handler now
+     *          └ remote owner ─> XADD the signed entry ─> RETURN
+     *
+     * Same signature, same addressing, same freshness and spent-id protection as
+     * a forwarded command: a sent command is exactly as trustworthy as a
+     * forwarded one, and the drain applies every one of those gates to both.
+     * What it does not do is wait, poll, sleep, or take the resource write
+     * lease. The ordering guarantee a caller gets is the owner's own
+     * single-threaded drain, in the order the entries were appended, and nothing
+     * stronger — which is why the lease is not taken (see executeCommand): a
+     * lease can refuse, and a refusal reaching a caller that has already
+     * returned is a silently dropped command.
+     *
+     * WHEN NOBODY OWNS THE RESOURCE the command is dropped, and said so once per
+     * worker through the same deduplicated report as a refused entry. This is
+     * the residual case only: resolving the owner is claimOwner(), which claims
+     * an unowned resource for this process, so an unowned resource makes this
+     * worker the owner and the command runs locally. A null here means the claim
+     * lost every attempt AND could not read back an owner, i.e. Redis is not
+     * answering usefully. There is no caller left to fail, so dropping is the
+     * only thing left to do; the log line is what stops it being silent.
+     */
+    public function send(string $resourceId, string $command, array $payload, string $reason = 'owner-command'): void
+    {
+        // Disabled means there is no cross-process routing at all, so this
+        // process is the only place the command can run. That is the same
+        // answer forwardIfOwnedByAnotherProcess() gives its caller by returning
+        // null; send() has no return value to say it with, so it acts on it.
+        if (!$this->enabled()) {
+            $this->dispatchCommand($this->localCommand($resourceId, $command, $payload));
+
+            return;
+        }
+
+        $owner = $this->remoteOwner($resourceId, $reason);
+
+        if ($owner['local']) {
+            $this->dispatchCommand($this->localCommand($resourceId, $command, $payload));
+
+            return;
+        }
+
+        if ($owner['target_process_key'] === null) {
+            $this->reportRefusal('sent to a resource with no resolvable owner', [
+                'resource_id' => $resourceId,
+                'command' => $command,
+                'note' => 'The command was dropped. send() has no caller to fail, so an unroutable command cannot be returned as an error.',
+            ]);
+
+            return;
+        }
+
+        $this->appendCommand($owner['target_process_key'], $resourceId, $command, $payload, expectsReply: false);
+    }
+
+    /**
+     * Which process a command for this resource belongs to.
+     *
+     * `local` is true when this process owns the resource and should run the
+     * command itself. `target_process_key` is the other process to write to, and
+     * null whenever there is nobody to write to: either because this process is
+     * the owner, or because no owner could be resolved at all. Callers that care
+     * about the difference read `local`.
+     *
+     * @return array{local: bool, target_process_key: ?string}
+     */
+    private function remoteOwner(string $resourceId, string $reason): array
+    {
         $ownerClaim = $this->resourceRouter->claimOwner($resourceId, $reason);
         $owner = $ownerClaim['owner'] ?? null;
 
-        if (($ownerClaim['local'] ?? false) || !is_array($owner)) {
-            return null;
+        if ($ownerClaim['local'] ?? false) {
+            return ['local' => true, 'target_process_key' => null];
+        }
+
+        if (!is_array($owner)) {
+            return ['local' => false, 'target_process_key' => null];
         }
 
         $targetProcessKey = $owner['process_key'] ?? null;
-        if (!is_string($targetProcessKey) || $targetProcessKey === '' || $targetProcessKey === $this->workerContext->currentProcessKey()) {
-            return null;
+
+        if (!is_string($targetProcessKey) || $targetProcessKey === '') {
+            return ['local' => false, 'target_process_key' => null];
         }
 
+        if ($targetProcessKey === $this->workerContext->currentProcessKey()) {
+            return ['local' => true, 'target_process_key' => null];
+        }
+
+        return ['local' => false, 'target_process_key' => $targetProcessKey];
+    }
+
+    /**
+     * One command executed here rather than sent, addressed to this process.
+     *
+     * A locally executed send is still an OwnerCommand, so the handler sees the
+     * same object whichever worker the socket happened to land on. It carries
+     * the same expectsReply: false, so nothing downstream can decide to answer a
+     * caller that has already returned.
+     */
+    private function localCommand(string $resourceId, string $command, array $payload): OwnerCommand
+    {
+        return new OwnerCommand(
+            requestId: (string) Str::uuid(),
+            resourceId: $resourceId,
+            command: $command,
+            payload: $payload,
+            originProcessKey: $this->workerContext->currentProcessKey(),
+            expectsReply: false,
+        );
+    }
+
+    /**
+     * Sign one command onto the owning process's stream and return its id.
+     *
+     * Shared by both delivery paths on purpose. Everything a drain checks before
+     * it calls the application's handler is decided here — the signature, the
+     * addressing, the freshness — so the two paths cannot drift into one being
+     * weaker than the other.
+     */
+    private function appendCommand(string $targetProcessKey, string $resourceId, string $command, array $payload, bool $expectsReply): string
+    {
         $requestId = (string) Str::uuid();
         $commandPayload = [
             'request_id' => $requestId,
@@ -250,6 +399,15 @@ class OwnerCommandBus
             // window; the drain also SPENDS the request id (see claimRequestId)
             // so that within the window the entry is deliverable exactly once.
             'issued_at' => time(),
+
+            // Whether anyone is waiting. Inside the signed bytes like everything
+            // else, so it cannot be flipped in transit: turning a sent command
+            // into one that expects a reply would make the owner write a
+            // response envelope nobody asked for, for every entry in a stream.
+            // Written only when false, so the bytes of a forwarded command are
+            // exactly what they were before this field existed and a fleet
+            // mid-deploy keeps verifying them.
+            ...($expectsReply ? [] : ['expects_reply' => false]),
         ];
 
         $connection = Redis::connection($this->redisConnection());
@@ -278,7 +436,7 @@ class OwnerCommandBus
         // always greater than the consumer's last-seen id.
         $connection->expire($streamKey, $this->streamTtlSeconds());
 
-        return $this->waitForResponse($requestId);
+        return $requestId;
     }
 
     /**
@@ -526,6 +684,11 @@ class OwnerCommandBus
                 continue;
             }
 
+            // Absent means true. A worker running an older build writes no such
+            // field, and the caller behind that entry IS polling a response
+            // key, so anything other than an explicit false must be answered.
+            $expectsReply = ($decodedMessage['expects_reply'] ?? true) !== false;
+
             try {
                 $command = new OwnerCommand(
                     requestId: $requestId,
@@ -533,6 +696,7 @@ class OwnerCommandBus
                     command: (string) ($decodedMessage['command'] ?? ''),
                     payload: is_array($decodedMessage['payload'] ?? null) ? $decodedMessage['payload'] : [],
                     originProcessKey: is_string($decodedMessage['origin_process_key'] ?? null) ? $decodedMessage['origin_process_key'] : null,
+                    expectsReply: $expectsReply,
                 );
                 $result = $this->executeCommand($command);
 
@@ -547,6 +711,20 @@ class OwnerCommandBus
                     'ok' => false,
                     'error' => $e->getMessage(),
                 ];
+            }
+
+            // NOBODY IS WAITING for a sent command: send() returned the moment
+            // the entry was written. Writing a response envelope anyway would
+            // put one short-lived Redis key per entry behind a stream whose
+            // whole point is volume, and no reader would ever delete one, so
+            // they would sit there for `response_ttl_seconds` apiece. The
+            // command still ran, and a handler that throws is still turned into
+            // a result above; there is simply no caller to hand it to.
+            //
+            // Read off the decoded entry rather than off $command, which the
+            // catch above can be reached without ever assigning.
+            if (!$expectsReply) {
+                continue;
             }
 
             // Inside the loop's own error handling, not outside it. A handler
@@ -715,7 +893,17 @@ class OwnerCommandBus
      */
     private function executeCommand(OwnerCommand $command): ?array
     {
-        if (!$this->writeLeaseEnabled() || $command->resourceId === '') {
+        // A command with no resource id has nothing to serialize on.
+        //
+        // A SENT command has nobody to tell. The lease can refuse — that is the
+        // answer it exists to be able to give — and every other caller on this
+        // bus gets that refusal back as a structured failure it can retry.
+        // send() has already returned, so a refusal here would be a command
+        // dropped in silence, at exactly the rate the caller chose send() for.
+        // What it gets instead is what send() promises and no more: the owner's
+        // own single-threaded drain, one command at a time, in the order the
+        // entries were appended.
+        if (!$this->writeLeaseEnabled() || $command->resourceId === '' || !$command->expectsReply) {
             return $this->dispatchCommand($command);
         }
 

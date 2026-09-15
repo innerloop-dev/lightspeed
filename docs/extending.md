@@ -380,6 +380,33 @@ class SaveNoteOwnerHandler implements OwnerCommandHandler
 
 This is the mechanism behind collaborative editing in Lightwave, the app Lightspeed was extracted from: every document mutation, whichever instance receives it, executes on the document's owning worker.
 
+### Sending work you do not need an answer to
+
+`forwardIfOwnedByAnotherProcess()` waits. It writes the command and then polls for the owner's response, and with `enable_coroutine` off (the default) that poll is a `usleep()` on the single event loop serving every connection this worker holds — so the calling worker answers nothing at all while it waits. For a mutation whose result you need, that is the price of the result. For a **stream** of commands whose result you do not, it is pure loss.
+
+`send()` is the same delivery without the wait:
+
+```php
+app(OwnerCommandBus::class)->send(
+    resourceId: (string) $arena->id,
+    command: 'player-input',
+    payload: $intent,
+);
+```
+
+If this worker owns the resource, the handler runs immediately. If another worker owns it, the signed command is appended to that worker's stream and `send()` returns: no response is written, nothing is polled, nothing sleeps. The owner runs it on its next drain, one command at a time, in the order the entries were appended. The receiving end is the same `OwnerCommandHandler` as above, and its return value is simply not sent anywhere; `$command->expectsReply` is `false`, so a handler that serves both paths can tell them apart.
+
+**Use it when** the caller has no use for the result: input frames, telemetry, cursor positions — anything where the next command is more useful than the last one's receipt.
+
+**Do not use it when** you need the result, need to know the command ran, or need to react to a failure. There is no return value, no error and no retry; a handler that throws is caught on the owner and there is nobody to report it to. Use `forwardIfOwnedByAnotherProcess()` for those and pay for the answer you are getting.
+
+Two more things it deliberately does not do:
+
+- **It takes no write lease.** The lease's job is to be able to refuse, and a refusal has no caller left to reach, so taking it would mean dropping commands in silence. The ordering a sent command gets is the owning worker's single-threaded drain, and nothing stronger. If your command needs the lease, it needs a reply too.
+- **It drops a command with no resolvable owner**, and logs a warning naming the resource and the command, once per worker. An *unowned* resource does not reach this: resolving the owner claims it, so an unowned resource makes the calling worker the owner and the command runs locally. A drop means Redis could neither grant the claim nor report who holds it. With no caller to fail, a log line is the only honest alternative to silence.
+
+Everything else is identical to the forwarding path: same signature, same process addressing, same freshness window, same spend-once request id. A sent command is exactly as trustworthy as a forwarded one, and the owner's drain applies every one of those checks to both.
+
 ## The write lease and its bound
 
 The write lease is a single Redis key with a fixed TTL (`LIGHTSPEED_RESOURCE_WRITE_LEASE_TTL_SECONDS`, default 10 seconds), and it is **not renewed while your handler runs**. So the guarantee is precise: **one writer per resource at a time, provided every mutation finishes inside the lease TTL.** Size the TTL above your slowest mutation.

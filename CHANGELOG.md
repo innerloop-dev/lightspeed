@@ -64,6 +64,15 @@ in production: keystrokes, presence, cursors, guest sessions.
 - Per-resource owner routing and write leases, so writes for a given resource
   are handled by a single worker and cannot interleave with another worker's
   writes. The owner command bus is HMAC signed in both directions.
+- `OwnerCommandBus::send()`, a fire-and-forget path to the owning worker for
+  command streams whose result the caller has no use for. It writes the signed
+  command to the owner's stream and returns, where
+  `forwardIfOwnedByAnotherProcess()` then polls for the reply on the single
+  event loop that serves every connection the calling worker holds. The owner
+  writes no response and takes no write lease for a sent command, and a command
+  with no resolvable owner is dropped and logged once per worker. Same
+  signature, process addressing, freshness window and spend-once request id as
+  a forwarded command.
 - Probes that open real clients against a running server and fail loudly:
   `lightspeed:probe`, `lightspeed:presence-probe`, `lightspeed:relay-probe`,
   `lightspeed:load-probe`.
