@@ -193,11 +193,10 @@ pecl install swoole
 Then enable it in the php.ini your PHP binary reads; `php --ini` prints which
 one that is. Without it, `composer require` refuses at the platform check.
 
-**1. Install the package.** Not on Packagist yet, so install from GitHub:
+**1. Install the package:**
 
 ```bash
-composer config repositories.lightspeed vcs https://github.com/innerloop-dev/lightspeed
-composer require innerloop-dev/lightspeed:dev-main
+composer require innerloop-dev/lightspeed
 ```
 
 You also need a PHP client for Redis, which this package does not install for
