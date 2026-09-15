@@ -64,6 +64,18 @@ in production: keystrokes, presence, cursors, guest sessions.
 - Per-resource owner routing and write leases, so writes for a given resource
   are handled by a single worker and cannot interleave with another worker's
   writes. The owner command bus is HMAC signed in both directions.
+- `OwnerCommandBus::forwardWithoutReply()`, a fire-and-forget path to the
+  owning worker for command streams whose result the caller has no use for. It
+  writes the signed command to the owner's stream and returns immediately: it
+  never polls, never sleeps and never waits. `forwardIfOwnedByAnotherProcess()`
+  writes the same command and then polls for the owner's reply, which with
+  `enable_coroutine` off blocks the single event loop serving every connection
+  the calling worker holds; that is the cost `forwardWithoutReply()` exists to
+  avoid. The owner writes no response and takes no write lease for a no-reply
+  command, a handler that fails on the owner is logged rather than swallowed,
+  and a command with no resolvable owner is dropped and logged per resource.
+  Same signature, process addressing, freshness window and spend-once request id
+  as a forwarded command.
 - Probes that open real clients against a running server and fail loudly:
   `lightspeed:probe`, `lightspeed:presence-probe`, `lightspeed:relay-probe`,
   `lightspeed:load-probe`.
