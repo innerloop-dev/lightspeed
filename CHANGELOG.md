@@ -9,6 +9,10 @@ contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-09-15
+
 Initial release. Extracted from Lightwave, the collaborative editor it powers
 in production: keystrokes, presence, cursors, guest sessions.
 
