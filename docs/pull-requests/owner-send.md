@@ -67,7 +67,7 @@ is one method and one wire field.
 - **`docs/extending.md`** (+32): a subsection beside "Routing work to the owning
   worker", including the deploy-order bound below.
 - **`CHANGELOG.md`** (+21/−3).
-- **`tests/Unit/OwnerCommandForwardWithoutReplyTest.php`**: new, 18 tests.
+- **`tests/Unit/OwnerCommandForwardWithoutReplyTest.php`**: new, 22 tests.
 
 No behaviour on the synchronous path changes, and its bytes on the wire do not
 change either — there is a test whose only job is to fail if they ever do.
@@ -75,7 +75,7 @@ change either — there is a test whose only job is to fail if they ever do.
 ## Proof
 
 **Suite.** `vendor/bin/pest > /tmp/lightspeed-pest.log 2>&1; echo "exit $?"` →
-`exit 0`, **1099 passed / 3611 assertions**, 18 of them new. Run against a real
+`exit 0`, **1103 passed / 3626 assertions**, 22 of them new. Run against a real
 Redis, as the suite does on purpose.
 
 **Watched failing.** Each of these was broken on purpose in the implementation,
@@ -88,21 +88,44 @@ restored:
 | `executeCommand()`'s `\|\| !$command->expectsReply` | removed | *takes no write lease* and *still executes when leased elsewhere* — only those two | `/tmp/break2.log` |
 | `forwardWithoutReply()`'s remote append | wrapped in `waitForResponse(...)` | *returns without waiting on the owner*, at **256.9ms** median against a 5ms bound (the real path measures ~0.1ms in-suite) | `/tmp/break3.log` |
 | `appendCommand()`'s conditional spread | `'expects_reply' => $expectsReply` (unconditional) | *a forwarded command carries no expects_reply field at all* — only that one | `/tmp/break-bytes.log` |
+| drain's catch block | `'ok' => true` | *a forwarded command whose handler throws is answered with the failure* — only that one | `/tmp/break-envelope.log` |
+| the `$failure` assignment on a declined command, and the local path's null check | both removed | *a no-reply command no handler accepted is reported* — on the owning worker and on the local one | `/tmp/break-nohandler.log` |
 
-The last one is the important one, and it is in this table because it was found
-by review rather than by me: the unconditional form **left all 1093 tests
-green**. It is correct in every single-version deployment and breaks owner
+Three of these were found by review rather than by me, and each had left the
+whole suite green.
+
+The `expects_reply` one: the unconditional form **left all 1093 tests green**. It is correct in every single-version deployment and breaks owner
 routing between two versions of the same application for the length of a rolling
 deploy, because both ends of the signing scheme are Lightspeed and a process
 talking to itself cannot notice that an encoding moved. The test now asserts the
 *absence* of a key rather than the value of one.
 
+The envelope one is worse in kind. Nothing asserted the **content** of the
+response the drain writes, only that a response existed, so the catch block could
+report `ok => true` with the suite still green — a handler that threw would have
+answered its caller with a success, and the caller would go on believing a
+mutation ran that never did. That is the worst answer this bus can give, worse
+than no answer at all. Now asserted, for a handler that throws and for one that
+declines.
+
+The third is the quietest. `$failure` was only set when the try *threw*, so a
+command that **no handler accepted** — a handler left out of
+`owner_command_handlers`, or one whose command string does not match, which is
+the likeliest way to get this wrong — produced a structured failure that the
+no-reply path then discarded, on both the drain and the local path. It reports
+now, through the same rate-limited line, and the message both paths use is a
+constant rather than two literals that could drift.
+
 **Mutation.** `vendor/bin/pest --mutate --covered-only --path=src/Owner/OwnerCommandBus.php --parallel`
-— **88.57%**, 331 tested / 51 untested / 3 timeout. The first run of this branch
-scored 87.61% and each round since has raised it; the absolute number is not
-comparable to `main`'s, because this change adds mutable lines of its own, so
-what follows is every survivor that falls on one of them. Four are equivalent
-mutants rather than missing tests:
+— **≈89.4%** (343 tested / 41 untested / 3 timeout on the run behind this
+sentence). Treat the figure as approximate: the run carries three timeouts, and a
+timeout is decided by wall clock on a loaded machine, so the same tree scores a
+few tenths either way from one run to the next — 88.57 and 88.83 were both
+observed on identical code. The first run of this branch scored 87.61% and each
+review round has raised it. The absolute number is not comparable to `main`'s
+either, because this change adds mutable lines of its own, so what follows is
+every survivor that falls on one of them. Four are equivalent mutants rather than
+missing tests:
 
 - `RemoveEarlyReturn` on `remoteOwner()`'s `!is_array($owner)` guard — both
   branches return the identical array (`?? null` suppresses the offset access on
@@ -114,10 +137,12 @@ mutants rather than missing tests:
 - `GreaterOrEqualToGreater` on the rate-limit sweep — a wall-clock boundary at
   *exactly* the interval, which no test can hit reliably.
 
-Six other survivors on new lines **were** missing tests and were killed: the
-early return on both local branches (exactly-once dispatch), the empty and the
-non-record owner-key branches, the drop note, and the rate limiter's expiry and
-its configured interval.
+Every other survivor on a new line **was** a missing test, and each was killed:
+the early return on both local branches (exactly-once dispatch), the empty and
+the non-record owner-key branches, the drop note, the failure note, the rate
+limiter's expiry and its configured interval, and — from the second review — the
+whole `ok`/`error` shape of the response envelope on the failure path, plus the
+declined-command branch on both no-reply paths.
 
 **Proven on a real application.** See the measurement section below. This is a
 consumer-app measurement, not a package benchmark.
@@ -201,8 +226,10 @@ another's line an hour earlier. It has its own headline (the bus refused
 nothing — it could not deliver) and is rate-limited per resource.
 
 **A failing handler is logged, not swallowed.** Raised in review: a no-reply
-command whose handler threw vanished with no trace. It now reports, rate-limited
-per resource and command.
+command whose handler threw vanished with no trace, and one that **no handler
+accepted** was quieter still, since declining raises nothing at all. Both now
+report, on the drain and on the local path, rate-limited per resource and
+command.
 
 **Local and remote failures are symmetric.** Not asked for, and the largest
 judgment call here. The local branch now runs through `executeCommand()` (so any

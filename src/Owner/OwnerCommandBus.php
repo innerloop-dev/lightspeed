@@ -108,6 +108,16 @@ use Swoole\WebSocket\Server;
  */
 class OwnerCommandBus
 {
+    /**
+     * What a command that every handler declined is reported as.
+     *
+     * A constant because both delivery paths have to say the same thing about
+     * the same event: the drain puts it in the response envelope a forwarded
+     * caller reads, and both no-reply paths put it in the log line that is the
+     * only report they have. Two literals would drift.
+     */
+    private const NO_HANDLER_ACCEPTED = 'No owner command handler accepted the message.';
+
     private ?Server $server = null;
 
     private ?int $timerId = null;
@@ -355,9 +365,21 @@ class OwnerCommandBus
     private function executeLocallyWithoutReply(string $resourceId, string $command, array $payload): void
     {
         try {
-            $this->executeCommand($this->localCommand($resourceId, $command, $payload));
+            $result = $this->executeCommand($this->localCommand($resourceId, $command, $payload));
         } catch (\Throwable $e) {
             $this->reportNoReplyFailure($resourceId, $command, $e->getMessage());
+
+            return;
+        }
+
+        // Null is "no handler took it", which on this path is silence in every
+        // direction: no response key, no caller, no exception. It is also the
+        // likeliest way an application gets this wrong — a handler left out of
+        // `owner_command_handlers`, or a command string that does not match the
+        // one the handler tests for — so it is reported exactly as a throw is,
+        // and by the same worker the drain would have reported it from.
+        if ($result === null) {
+            $this->reportNoReplyFailure($resourceId, $command, self::NO_HANDLER_ACCEPTED);
         }
     }
 
@@ -757,10 +779,17 @@ class OwnerCommandBus
                 );
                 $result = $this->executeCommand($command);
 
+                // A DECLINED COMMAND IS A FAILED ONE, exactly as much as a
+                // thrown one: every handler answered null, so nothing ran. It
+                // is recorded as a failure rather than merely shaped like one,
+                // because the no-reply path below reports failures and this is
+                // the likeliest of them — a handler that was never registered,
+                // or whose command string does not match.
                 if ($result === null) {
+                    $failure = self::NO_HANDLER_ACCEPTED;
                     $result = [
                         'ok' => false,
-                        'error' => 'No owner command handler accepted the message.',
+                        'error' => $failure,
                     ];
                 }
             } catch (\Throwable $e) {
@@ -771,19 +800,21 @@ class OwnerCommandBus
                 ];
             }
 
-            // NOBODY IS WAITING for a no-reply command: forwardWithoutReply() returned the moment
-            // the entry was written. Writing a response envelope anyway would
-            // put one short-lived Redis key per entry behind a stream whose
-            // whole point is volume, and no reader would ever delete one, so
-            // they would sit there for `response_ttl_seconds` apiece.
+            // NOBODY IS WAITING for a no-reply command: forwardWithoutReply()
+            // returned the moment the entry was written. Writing a response
+            // envelope anyway would put one short-lived Redis key per entry
+            // behind a stream whose whole point is volume, and no reader would
+            // ever delete one, so they would sit there for
+            // `response_ttl_seconds` apiece.
             if (!$expectsReply) {
                 // The response key IS the failure report for a forwarded
                 // command. A no-reply one has no such key and no caller, so a
-                // handler that threw would leave nothing at all behind: an
-                // application whose owner handler is broken would see its
-                // commands silently do nothing, on the path built to carry the
-                // most of them. Rate-limited, because a broken handler fails at
-                // the rate the stream arrives.
+                // handler that threw, or that was never registered, would leave
+                // nothing at all behind: an application whose owner handler is
+                // broken or misnamed would see its commands silently do
+                // nothing, on the path built to carry the most of them.
+                // Rate-limited, because a broken handler fails at the rate the
+                // stream arrives.
                 if ($failure !== null) {
                     $this->reportNoReplyFailure($entryResourceId, $entryCommand, $failure);
                 }
@@ -959,14 +990,14 @@ class OwnerCommandBus
     {
         // A command with no resource id has nothing to serialize on.
         //
-        // A SENT command has nobody to tell. The lease can refuse — that is the
-        // answer it exists to be able to give — and every other caller on this
-        // bus gets that refusal back as a structured failure it can retry.
-        // forwardWithoutReply() has already returned, so a refusal here would be a command
-        // dropped in silence, at exactly the rate the caller chose forwardWithoutReply() for.
-        // What it gets instead is what forwardWithoutReply() promises and no more: the owner's
-        // own single-threaded drain, one command at a time, in the order the
-        // entries were appended.
+        // A NO-REPLY command has nobody to tell. The lease can refuse — that is
+        // the answer it exists to be able to give — and every other caller on
+        // this bus gets that refusal back as a structured failure it can retry.
+        // forwardWithoutReply() has already returned, so a refusal here would be
+        // a command dropped in silence, at exactly the rate the caller chose
+        // that path for. What it gets instead is what forwardWithoutReply()
+        // promises and no more: the owner's own single-threaded drain, one
+        // command at a time, in the order the entries were appended.
         if (!$this->writeLeaseEnabled() || $command->resourceId === '' || !$command->expectsReply) {
             return $this->dispatchCommand($command);
         }

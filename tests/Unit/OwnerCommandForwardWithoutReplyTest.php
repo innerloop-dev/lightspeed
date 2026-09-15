@@ -511,24 +511,26 @@ test('a no-reply command whose resource is leased elsewhere still executes', fun
  * The reply is skipped on an explicit false and on nothing else, so an entry
  * written by a worker that predates the field is answered exactly as before.
  */
-test('a command that does not say otherwise is still answered', function () {
-    [$owner, $ownerProcessKey] = ownerNoReplyBus('send-compat-owner', fn () => ['ok' => true, 'v' => 9]);
-    $this->streams[] = $ownerProcessKey;
-
-    $requestId = 'compat-'.bin2hex(random_bytes(8));
+/**
+ * One entry in the shape a FORWARDED command has on the wire: no
+ * `expects_reply` field at all, because that field is only written when false.
+ * This is what a caller polling a response key leaves on the stream.
+ */
+function ownerNoReplyPushForwarded(string $processKey, string $requestId, string $command = 'apply-edit'): void
+{
     $message = json_encode([
         'request_id' => $requestId,
         'resource_id' => '',
-        'command' => 'apply-edit',
+        'command' => $command,
         'payload' => [],
         'origin_process_key' => 'caller-worker',
-        'target_process_key' => $ownerProcessKey,
+        'target_process_key' => $processKey,
         'issued_at' => time(),
     ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
     RedisStreams::add(
         Redis::connection()->client(),
-        "lightspeed:owner-commands:{$ownerProcessKey}",
+        "lightspeed:owner-commands:{$processKey}",
         [
             'message' => $message,
             'signature' => hash_hmac(
@@ -539,6 +541,26 @@ test('a command that does not say otherwise is still answered', function () {
         ],
         1000,
     );
+}
+
+/** The result the owner wrote back for one request, out of its envelope. */
+function ownerNoReplyResponse(string $requestId): array
+{
+    $raw = Redis::connection()->get("lightspeed:owner-command-response:{$requestId}");
+
+    expect($raw)->toBeString('the owner wrote no response for this request');
+
+    $envelope = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+
+    return json_decode($envelope['result'], true, 512, JSON_THROW_ON_ERROR);
+}
+
+test('a command that does not say otherwise is still answered', function () {
+    [$owner, $ownerProcessKey] = ownerNoReplyBus('send-compat-owner', fn () => ['ok' => true, 'v' => 9]);
+    $this->streams[] = $ownerProcessKey;
+
+    $requestId = 'compat-'.bin2hex(random_bytes(8));
+    ownerNoReplyPushForwarded($ownerProcessKey, $requestId);
 
     try {
         ownerNoReplyDrain($owner);
@@ -547,6 +569,113 @@ test('a command that does not say otherwise is still answered', function () {
     } finally {
         Redis::connection()->del("lightspeed:owner-command-response:{$requestId}");
     }
+});
+
+/**
+ * A FORWARDED COMMAND MUST NOT BE TOLD IT SUCCEEDED WHEN IT DID NOT.
+ *
+ * Nothing asserted the CONTENT of the envelope the drain writes, only that an
+ * envelope existed. So the catch block could be changed to report `ok => true`
+ * with the whole suite still green — and a handler that threw would answer its
+ * caller with a success, leaving the caller believing a mutation ran that never
+ * did. That is the worst answer this bus can give, worse than no answer at all.
+ */
+test('a forwarded command whose handler throws is answered with the failure', function () {
+    [$owner, $ownerProcessKey] = ownerNoReplyBus('forward-throw-owner', function () {
+        throw new RuntimeException('the edit handler exploded');
+    });
+    $this->streams[] = $ownerProcessKey;
+
+    $requestId = 'forward-throw-'.bin2hex(random_bytes(8));
+    ownerNoReplyPushForwarded($ownerProcessKey, $requestId);
+
+    try {
+        ownerNoReplyDrain($owner);
+
+        $result = ownerNoReplyResponse($requestId);
+
+        expect($result['ok'])->toBeFalse('a handler that threw reported success to its caller')
+            ->and($result['error'])->toContain('the edit handler exploded');
+    } finally {
+        Redis::connection()->del("lightspeed:owner-command-response:{$requestId}");
+    }
+});
+
+/**
+ * And the same for a command no handler took. Declining is not an error the
+ * handler raised, so it is the case most likely to be shaped like a failure
+ * without being reported as one.
+ */
+test('a forwarded command no handler accepted is answered with the failure', function () {
+    [$owner, $ownerProcessKey] = ownerNoReplyBus('forward-decline-owner', fn () => null);
+    $this->streams[] = $ownerProcessKey;
+
+    $requestId = 'forward-decline-'.bin2hex(random_bytes(8));
+    ownerNoReplyPushForwarded($ownerProcessKey, $requestId);
+
+    try {
+        ownerNoReplyDrain($owner);
+
+        $result = ownerNoReplyResponse($requestId);
+
+        expect($result['ok'])->toBeFalse()
+            ->and($result['error'])->toBe('No owner command handler accepted the message.');
+    } finally {
+        Redis::connection()->del("lightspeed:owner-command-response:{$requestId}");
+    }
+});
+
+/**
+ * A MISSING HANDLER IS THE LIKELIEST WAY TO GET THIS WRONG, and on the no-reply
+ * path it was the quietest: a handler left out of `owner_command_handlers`, or
+ * one whose command string does not match, returns null rather than throwing.
+ * There is no response key and no caller, so nothing at all was written down,
+ * and the application saw its commands do nothing for no stated reason.
+ */
+test('a no-reply command no handler accepted is reported on the owning worker', function () {
+    [$owner, $ownerProcessKey] = ownerNoReplyBus('no-handler-owner', fn () => null);
+    $this->streams[] = $ownerProcessKey;
+
+    ownerNoReplyGiveOwnershipTo($this->resourceId, $ownerProcessKey);
+
+    [$caller, $callerProcessKey] = ownerNoReplyBus('no-handler-caller');
+    $this->streams[] = $callerProcessKey;
+
+    $logged = [];
+    Log::shouldReceive('warning')
+        ->once()
+        ->andReturnUsing(function (string $message, array $context) use (&$logged): void {
+            $logged = ['message' => $message, 'context' => $context];
+        });
+
+    $caller->forwardWithoutReply($this->resourceId, 'arena-input', []);
+    ownerNoReplyDrain($owner);
+
+    expect($logged['message'])->toBe('Lightspeed no-reply owner command failed on the owning worker')
+        ->and($logged['context']['resource_id'])->toBe($this->resourceId)
+        ->and($logged['context']['command'])->toBe('arena-input')
+        ->and($logged['context']['error'])->toBe('No owner command handler accepted the message.');
+});
+
+test('a no-reply command no handler accepted is reported on the local worker too', function () {
+    $logged = [];
+    Log::shouldReceive('warning')
+        ->once()
+        ->andReturnUsing(function (string $message, array $context) use (&$logged): void {
+            $logged = ['message' => $message, 'context' => $context];
+        });
+
+    // Nobody owns it, so the claim inside forwardWithoutReply() takes it for
+    // this process and the dispatch happens right here. Which worker held the
+    // socket must not decide whether a misconfiguration is visible.
+    [$bus, $processKey] = ownerNoReplyBus('no-handler-local', fn () => null);
+    $this->streams[] = $processKey;
+
+    $bus->forwardWithoutReply($this->resourceId, 'arena-input', []);
+
+    expect($logged['message'])->toBe('Lightspeed no-reply owner command failed on the owning worker')
+        ->and($logged['context']['resource_id'])->toBe($this->resourceId)
+        ->and($logged['context']['error'])->toBe('No owner command handler accepted the message.');
 });
 
 test('a forwardWithoutReply whose resource has no resolvable owner is dropped and reported', function () {
