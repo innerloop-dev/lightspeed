@@ -498,6 +498,18 @@ return [
         // interleave with one the owner is already running.
         'write_lease' => (bool) env('LIGHTSPEED_OWNER_COMMANDS_WRITE_LEASE', true),
 
+        // How often one worker will report the same problem with a NO-REPLY command
+        // (`OwnerCommandBus::forwardWithoutReply()`), per resource and command,
+        // in seconds.
+        //
+        // A no-reply command has no caller and no response key, so a log line is the
+        // only report of a command that could not be routed or whose handler
+        // threw. The rate limit is what stops that being one line per command on
+        // a stream chosen for its volume, and it is a limit rather than a
+        // once-per-worker mute so that a resource which breaks again tomorrow
+        // can still say so.
+        'no_reply_report_interval_seconds' => (int) env('LIGHTSPEED_OWNER_COMMANDS_NO_REPLY_REPORT_INTERVAL_SECONDS', 60),
+
         // How long a signed command or response stays deliverable, in seconds.
         //
         // Both directions carry a signed `issued_at`, and both ends refuse

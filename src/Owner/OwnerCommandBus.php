@@ -28,8 +28,9 @@ use Swoole\WebSocket\Server;
  *          ▲                          dispatch to handler
  *          └───────── SETEX response  release lease (finally)
  *
- * Or they do not wait, which is the other half of this class. send() writes the
- * same signed entry and returns; the owner runs it and writes nothing back:
+ * Or they do not wait, which is the other half of this class.
+ * forwardWithoutReply() writes the same signed entry and returns; the owner
+ * runs it and writes nothing back:
  *
  *   caller worker                     owning worker
  *   ─────────────                     ─────────────
@@ -38,9 +39,9 @@ use Swoole\WebSocket\Server;
  *
  * The two paths differ in what the caller is promised, never in what the owner
  * is willing to execute: both entries are signed, addressed, bounded by the
- * freshness window and spendable once. A sent command takes no write lease,
+ * freshness window and spendable once. A no-reply command takes no write lease,
  * because a lease can refuse and a refusal has no caller left to reach; see
- * send() and executeCommand().
+ * forwardWithoutReply() and executeCommand().
  *
  * What the write lease actually guarantees, and its bound:
  *
@@ -129,6 +130,18 @@ class OwnerCommandBus
      * @var array<string, true>
      */
     private array $refusalsLogged = [];
+
+    /**
+     * When this worker last reported something about a no-reply command.
+     *
+     * Size: bounded by the number of distinct keys that reported inside one
+     * rate-limit interval, because every lapsed entry is swept on the way in.
+     * See reportNoReplyCommand(), which is where the keys are shaped and why
+     * this is not $refusalsLogged.
+     *
+     * @var array<string, float>
+     */
+    private array $noReplyReportedAt = [];
 
     /** @var null|callable(OwnerCommand): ?array */
     private $executor = null;
@@ -256,11 +269,11 @@ class OwnerCommandBus
      * frames, telemetry, anything whose only requirement is that the owner
      * applies it in order — it buys nothing and spends the worker's loop on it.
      *
-     *   send() ─ local owner ──> dispatch to the handler now
-     *          └ remote owner ─> XADD the signed entry ─> RETURN
+     *   local owner  ──> dispatch to the handler now
+     *   remote owner ──> XADD the signed entry ─> RETURN
      *
      * Same signature, same addressing, same freshness and spent-id protection as
-     * a forwarded command: a sent command is exactly as trustworthy as a
+     * a forwarded command: a no-reply command is exactly as trustworthy as a
      * forwarded one, and the drain applies every one of those gates to both.
      * What it does not do is wait, poll, sleep, or take the resource write
      * lease. The ordering guarantee a caller gets is the owner's own
@@ -269,46 +282,83 @@ class OwnerCommandBus
      * lease can refuse, and a refusal reaching a caller that has already
      * returned is a silently dropped command.
      *
-     * WHEN NOBODY OWNS THE RESOURCE the command is dropped, and said so once per
-     * worker through the same deduplicated report as a refused entry. This is
-     * the residual case only: resolving the owner is claimOwner(), which claims
-     * an unowned resource for this process, so an unowned resource makes this
+     * WHEN NOBODY OWNS THE RESOURCE the command is dropped, and reported per
+     * resource at a bounded rate (see reportNoReplyCommand). This is the
+     * residual case only: resolving the owner is claimOwner(), which claims an
+     * unowned resource for this process, so an unowned resource makes this
      * worker the owner and the command runs locally. A null here means the claim
      * lost every attempt AND could not read back an owner, i.e. Redis is not
      * answering usefully. There is no caller left to fail, so dropping is the
      * only thing left to do; the log line is what stops it being silent.
+     *
+     * IT CAN STILL THROW, in one case and for the same reason the forwarding
+     * path can: with Redis unreachable the ownership lookup or the stream write
+     * raises, and that reaches the caller. "Without reply" means nobody waits on
+     * the owner, not that the call cannot fail before it gets there.
      */
-    public function send(string $resourceId, string $command, array $payload, string $reason = 'owner-command'): void
+    public function forwardWithoutReply(string $resourceId, string $command, array $payload, string $reason = 'owner-command'): void
     {
         // Disabled means there is no cross-process routing at all, so this
         // process is the only place the command can run. That is the same
         // answer forwardIfOwnedByAnotherProcess() gives its caller by returning
-        // null; send() has no return value to say it with, so it acts on it.
+        // null; forwardWithoutReply() has no return value to say it with, so it
+        // acts on it.
         if (!$this->enabled()) {
-            $this->dispatchCommand($this->localCommand($resourceId, $command, $payload));
+            $this->executeLocallyWithoutReply($resourceId, $command, $payload);
 
             return;
         }
 
-        $owner = $this->remoteOwner($resourceId, $reason);
+        $route = $this->remoteOwner($resourceId, $reason);
 
-        if ($owner['local']) {
-            $this->dispatchCommand($this->localCommand($resourceId, $command, $payload));
-
-            return;
-        }
-
-        if ($owner['target_process_key'] === null) {
-            $this->reportRefusal('sent to a resource with no resolvable owner', [
-                'resource_id' => $resourceId,
-                'command' => $command,
-                'note' => 'The command was dropped. send() has no caller to fail, so an unroutable command cannot be returned as an error.',
-            ]);
+        if ($route['local']) {
+            $this->executeLocallyWithoutReply($resourceId, $command, $payload);
 
             return;
         }
 
-        $this->appendCommand($owner['target_process_key'], $resourceId, $command, $payload, expectsReply: false);
+        if ($route['target_process_key'] === null) {
+            $this->reportNoReplyCommand(
+                'Lightspeed dropped a no-reply owner command: no resolvable owner',
+                "no-owner:{$resourceId}",
+                [
+                    'resource_id' => $resourceId,
+                    'command' => $command,
+                    'note' => 'The command was dropped. forwardWithoutReply() has no caller to fail, so an unroutable command cannot be returned as an error.',
+                ],
+            );
+
+            return;
+        }
+
+        $this->appendCommand($route['target_process_key'], $resourceId, $command, $payload, expectsReply: false);
+    }
+
+    /**
+     * Run a no-reply command here, the way the owning worker's drain would.
+     *
+     * Through executeCommand() rather than straight to the dispatcher, so the
+     * two ways a no-reply command can reach a handler stay ONE path with one
+     * set of gates: whatever is added there later applies to a socket that
+     * landed on the owner as well as to one that did not. executeCommand()
+     * skips the write lease for a no-reply command by itself, so nothing here
+     * is stricter than the remote side.
+     *
+     * A THROWING HANDLER MUST NOT REACH THE CALLER, and this is the half of
+     * that which is easy to miss. On the remote path the drain catches, so the
+     * caller never sees a handler's exception. If this path let one out, the
+     * same failing handler would be either silent or fatal depending on which
+     * worker Swoole happened to hand the socket to, which is not something an
+     * application can write code against. So it is caught here and reported in
+     * exactly the shape the drain reports it.
+     */
+    private function executeLocallyWithoutReply(string $resourceId, string $command, array $payload): void
+    {
+        try {
+            $this->executeCommand($this->localCommand($resourceId, $command, $payload));
+        } catch (\Throwable $e) {
+            $this->reportNoReplyFailure($resourceId, $command, $e->getMessage());
+        }
     }
 
     /**
@@ -401,7 +451,7 @@ class OwnerCommandBus
             'issued_at' => time(),
 
             // Whether anyone is waiting. Inside the signed bytes like everything
-            // else, so it cannot be flipped in transit: turning a sent command
+            // else, so it cannot be flipped in transit: turning a no-reply command
             // into one that expects a reply would make the owner write a
             // response envelope nobody asked for, for every entry in a stream.
             // Written only when false, so the bytes of a forwarded command are
@@ -689,11 +739,18 @@ class OwnerCommandBus
             // key, so anything other than an explicit false must be answered.
             $expectsReply = ($decodedMessage['expects_reply'] ?? true) !== false;
 
+            // Read off the decoded entry, not off $command: the catch below can
+            // be reached with $command never assigned, and a report about a
+            // command that failed has to be able to name it.
+            $entryResourceId = (string) ($decodedMessage['resource_id'] ?? '');
+            $entryCommand = (string) ($decodedMessage['command'] ?? '');
+            $failure = null;
+
             try {
                 $command = new OwnerCommand(
                     requestId: $requestId,
-                    resourceId: (string) ($decodedMessage['resource_id'] ?? ''),
-                    command: (string) ($decodedMessage['command'] ?? ''),
+                    resourceId: $entryResourceId,
+                    command: $entryCommand,
                     payload: is_array($decodedMessage['payload'] ?? null) ? $decodedMessage['payload'] : [],
                     originProcessKey: is_string($decodedMessage['origin_process_key'] ?? null) ? $decodedMessage['origin_process_key'] : null,
                     expectsReply: $expectsReply,
@@ -707,23 +764,30 @@ class OwnerCommandBus
                     ];
                 }
             } catch (\Throwable $e) {
+                $failure = $e->getMessage();
                 $result = [
                     'ok' => false,
-                    'error' => $e->getMessage(),
+                    'error' => $failure,
                 ];
             }
 
-            // NOBODY IS WAITING for a sent command: send() returned the moment
+            // NOBODY IS WAITING for a no-reply command: forwardWithoutReply() returned the moment
             // the entry was written. Writing a response envelope anyway would
             // put one short-lived Redis key per entry behind a stream whose
             // whole point is volume, and no reader would ever delete one, so
-            // they would sit there for `response_ttl_seconds` apiece. The
-            // command still ran, and a handler that throws is still turned into
-            // a result above; there is simply no caller to hand it to.
-            //
-            // Read off the decoded entry rather than off $command, which the
-            // catch above can be reached without ever assigning.
+            // they would sit there for `response_ttl_seconds` apiece.
             if (!$expectsReply) {
+                // The response key IS the failure report for a forwarded
+                // command. A no-reply one has no such key and no caller, so a
+                // handler that threw would leave nothing at all behind: an
+                // application whose owner handler is broken would see its
+                // commands silently do nothing, on the path built to carry the
+                // most of them. Rate-limited, because a broken handler fails at
+                // the rate the stream arrives.
+                if ($failure !== null) {
+                    $this->reportNoReplyFailure($entryResourceId, $entryCommand, $failure);
+                }
+
                 continue;
             }
 
@@ -898,9 +962,9 @@ class OwnerCommandBus
         // A SENT command has nobody to tell. The lease can refuse — that is the
         // answer it exists to be able to give — and every other caller on this
         // bus gets that refusal back as a structured failure it can retry.
-        // send() has already returned, so a refusal here would be a command
-        // dropped in silence, at exactly the rate the caller chose send() for.
-        // What it gets instead is what send() promises and no more: the owner's
+        // forwardWithoutReply() has already returned, so a refusal here would be a command
+        // dropped in silence, at exactly the rate the caller chose forwardWithoutReply() for.
+        // What it gets instead is what forwardWithoutReply() promises and no more: the owner's
         // own single-threaded drain, one command at a time, in the order the
         // entries were appended.
         if (!$this->writeLeaseEnabled() || $command->resourceId === '' || !$command->expectsReply) {
@@ -980,6 +1044,71 @@ class OwnerCommandBus
             'process_key' => $this->workerContext->currentProcessKey(),
             'reason' => $reason,
             'note' => 'Further refusals for this reason are not logged by this worker.',
+            ...$context,
+        ]);
+    }
+
+    /**
+     * Report that a no-reply command failed on the worker that was to run it.
+     *
+     * Keyed on the resource and the command, so a broken handler for one
+     * resource does not hide a broken handler for another.
+     */
+    private function reportNoReplyFailure(string $resourceId, string $command, string $error): void
+    {
+        $this->reportNoReplyCommand(
+            'Lightspeed no-reply owner command failed on the owning worker',
+            "failed:{$resourceId}:{$command}",
+            [
+                'resource_id' => $resourceId,
+                'command' => $command,
+                'error' => $error,
+                'note' => 'A no-reply command has no caller and no response key, so this line is the only report of the failure.',
+            ],
+        );
+    }
+
+    /**
+     * Log one thing that happened to a no-reply command, at most once per
+     * interval per key.
+     *
+     * DELIBERATELY NOT reportRefusal(). That one dedupes on a REASON and keeps
+     * it forever, which is right for a refusal: the reasons are a closed set of
+     * four, an attacker chooses the volume, and the first line says everything
+     * about the class of problem. Neither half fits here. A drop or a handler
+     * failure is per RESOURCE, so "refused: no resolvable owner" logged once
+     * would have let arena 9 going dark hide behind arena 7's line an hour
+     * earlier. And these are not refusals at all: the bus decided nothing about
+     * them, they are work it could not deliver or could not complete, so they
+     * get their own headline rather than borrowing "refused".
+     *
+     * Rate-limited rather than once-forever for the same reason: a resource that
+     * recovers and breaks again tomorrow has to be able to say so. The window
+     * also bounds the map, which is keyed on caller-supplied resource ids and
+     * would otherwise grow with them: every entry older than the interval is
+     * swept on the way in, so the map only ever holds the keys that reported
+     * inside one window.
+     */
+    private function reportNoReplyCommand(string $headline, string $key, array $context): void
+    {
+        $now = microtime(true);
+        $interval = max(1.0, (float) $this->config->get('lightspeed.owner_commands.no_reply_report_interval_seconds', 60));
+
+        foreach ($this->noReplyReportedAt as $seen => $reportedAt) {
+            if ($now - $reportedAt >= $interval) {
+                unset($this->noReplyReportedAt[$seen]);
+            }
+        }
+
+        if (isset($this->noReplyReportedAt[$key])) {
+            return;
+        }
+
+        $this->noReplyReportedAt[$key] = $now;
+
+        Log::warning($headline, [
+            'process_key' => $this->workerContext->currentProcessKey(),
+            'rate_limit' => "At most one line per {$interval}s for this resource and command.",
             ...$context,
         ]);
     }
