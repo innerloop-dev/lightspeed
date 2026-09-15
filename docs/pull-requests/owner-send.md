@@ -54,7 +54,7 @@ is one method and one wire field.
 
 ## What changed
 
-- **`src/Owner/OwnerCommandBus.php`** (+205/−6 including the extractions). The
+- **`src/Owner/OwnerCommandBus.php`** (+358/−10 including the extractions). The
   new public `forwardWithoutReply()`; `executeLocallyWithoutReply()`;
   `reportNoReplyFailure()` and `reportNoReplyCommand()`. Two extractions that
   the two delivery paths now share rather than duplicate: `remoteOwner()` (the
@@ -62,12 +62,12 @@ is one method and one wire field.
   every gate the drain checks). The drain reads `expects_reply` and skips the
   response write on an explicit `false`; `executeCommand()` skips the write
   lease for a no-reply command.
-- **`src/Owner/OwnerCommand.php`** (+10): `public readonly bool $expectsReply = true`.
+- **`src/Owner/OwnerCommand.php`** (+12): `public readonly bool $expectsReply = true`.
 - **`config/lightspeed.php`** (+12): `owner_commands.no_reply_report_interval_seconds`.
-- **`docs/extending.md`** (+32): a subsection beside "Routing work to the owning
+- **`docs/extending.md`** (+41): a subsection beside "Routing work to the owning
   worker", including the deploy-order bound below.
-- **`CHANGELOG.md`** (+21/−3).
-- **`tests/Unit/OwnerCommandForwardWithoutReplyTest.php`**: new, 22 tests.
+- **`CHANGELOG.md`** (+12).
+- **`tests/Unit/OwnerCommandForwardWithoutReplyTest.php`** (+824): new, 22 tests.
 
 No behaviour on the synchronous path changes, and its bytes on the wire do not
 change either — there is a test whose only job is to fail if they ever do.
@@ -94,7 +94,8 @@ restored:
 Three of these were found by review rather than by me, and each had left the
 whole suite green.
 
-The `expects_reply` one: the unconditional form **left all 1093 tests green**. It is correct in every single-version deployment and breaks owner
+The `expects_reply` one: the unconditional form **left all 1093 tests green**. It
+is correct in every single-version deployment and breaks owner
 routing between two versions of the same application for the length of a rolling
 deploy, because both ends of the signing scheme are Lightspeed and a process
 talking to itself cannot notice that an encoding moved. The test now asserts the
