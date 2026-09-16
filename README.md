@@ -11,7 +11,7 @@
 
 Lightspeed is a Swoole-based, Pusher-compatible websocket server with authenticated bidirectional sockets, running your whole app in one server.
 
-**Live demo: <https://innerloop.works/lightspeed>.** An asteroids-style multiplayer arena on the landing page, sharded into arenas of five, its authoritative world state ticking at 30Hz inside Lightspeed. A server you can join, rather than a screenshot: [what it measured in production](docs/reports/2026-09-14-arena-production-load.md).
+**Live demo: <https://innerloop.works/lightspeed>.** An asteroids-style multiplayer arena on the landing page, sharded into arenas of five, its authoritative world state ticking at 30Hz inside Lightspeed. A server you can join, rather than a screenshot: [what it measured in production](docs/reports/2026-09-16-arena-production-load.md).
 
 Your browser sends a websocket message. Your auth runs. Your Laravel code handles it. The answer comes straight back down the same websocket, fast enough to sit behind a keystroke: [0.28ms median](docs/verifying.md#round-trip-latency-browser-to-laravel-to-browser) on a laptop, server side. The rest of the budget is your network and your handler.
 
@@ -296,7 +296,7 @@ php -d memory_limit=-1 artisan lightspeed:load-probe \
 
 Full method, the per-size table, and what to read from it: [Verifying](docs/verifying.md).
 
-Measured again on a production box, under a different shape of load: 3,020 sockets taking a 30Hz simulation from the arena on [innerloop.works/lightspeed](https://innerloop.works/lightspeed), including where it broke. [The 2026-09-14 arena load report](docs/reports/2026-09-14-arena-production-load.md).
+Measured again on a production box, under a different shape of load: 1,000 sockets taking a 30Hz simulation from the arena on [innerloop.works/lightspeed](https://innerloop.works/lightspeed), with input round-tripping in 256ms at p95. [The 2026-09-16 arena load report](docs/reports/2026-09-16-arena-production-load.md).
 
 ## Learn more
 
