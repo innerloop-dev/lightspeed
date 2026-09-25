@@ -24,18 +24,29 @@ jobs:
     # The same is true of the FRAMEWORK floor, and it was not: composer.json
     # advertises illuminate ^11.0|^12.0 while testbench pinned the suite to
     # Laravel 12, so nothing had ever run the unit suite against 11. Testbench 9
-    # is the Laravel 11 line and testbench 10 is the Laravel 12 line, so which
-    # one is installed is what decides the framework under test.
+    # is the Laravel 11 line, testbench 10 the Laravel 12 line and testbench 11
+    # the Laravel 13 line, so which one is installed is what decides the
+    # framework under test.
+    #
+    # Laravel 13 requires PHP ^8.3, so PHP 8.2 x Laravel 13 is not a cell that
+    # can exist: Composer refuses it before a test runs. The package floor stays
+    # ^8.2 because it is still true on 11 and 12, and the 8.2 cells of those
+    # two lines are what keep it true.
     strategy:
       fail-fast: false
       matrix:
         php: ['8.2', '8.3', '8.4']
-        laravel: ['11', '12']
+        laravel: ['11', '12', '13']
         include:
           - laravel: '11'
             testbench: '^9.0'
           - laravel: '12'
             testbench: '^10.0'
+          - laravel: '13'
+            testbench: '^11.0'
+        exclude:
+          - php: '8.2'
+            laravel: '13'
     # The suite talks to a real Redis on purpose: the lease and presence
     # guarantees are Redis semantics (SET NX EX, compare-and-delete, hash field
     # types), and testing them against a fake would prove nothing.
@@ -103,7 +114,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        laravel: ['11', '12']
+        laravel: ['11', '12', '13']
     services:
       redis:
         image: redis:7
