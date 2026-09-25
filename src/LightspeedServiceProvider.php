@@ -105,12 +105,20 @@ class LightspeedServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        Broadcast::extend('lightspeed', function ($app, array $config = []) {
+        // Captured out here because the closure below cannot say `$this`:
+        // Laravel 13's extend() rebinds the closure's `$this` to the
+        // BroadcastManager. `$this->pusherClient()` then falls through the
+        // manager's `__call` to driver(), which resolves this same closure,
+        // and it recurses until memory runs out: every artisan command and
+        // every request in the host application, dead at boot.
+        $pusherClient = $this->pusherClient(...);
+
+        Broadcast::extend('lightspeed', function ($app, array $config = []) use ($pusherClient) {
             return new LightspeedBroadcaster(
                 $app->make(BroadcastBridge::class),
                 $app->make(PendingGrants::class),
                 $app->make(RevocationLog::class),
-                $this->pusherClient(),
+                $pusherClient(),
             );
         });
 
