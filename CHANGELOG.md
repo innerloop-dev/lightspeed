@@ -9,7 +9,20 @@ contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Laravel 13, alongside 11 and 12. Laravel 13 needs PHP 8.3; the package
+  floor stays PHP 8.2, which 11 and 12 still run on. CI runs the unit suite
+  and the live-server job on all three. 0.1.0 refuses Laravel 13 at
+  `composer require`, so it arrives with the first release after 0.1.0.
+
+### Fixed
+
+- On Laravel 13, resolving the `lightspeed` broadcast driver recursed until
+  memory ran out. Laravel 13's `Broadcast::extend()` rebinds the driver
+  closure's `$this` to the broadcast manager, and the closure used `$this` to
+  reach the provider. Once `lightspeed:install` had run, every artisan command
+  and every request in the application died at boot.
 
 ## [0.1.0] - 2026-09-15
 
