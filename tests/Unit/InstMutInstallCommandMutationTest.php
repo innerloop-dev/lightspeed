@@ -424,7 +424,7 @@ it('inserts the connection immediately after the connections array opens', funct
  *
  * Both files have to be there. Uncommenting a provider line in config/app.php
  * for a class the application does not have is an application that cannot boot,
- * and a Laravel 11 or 12 skeleton has the config file and no provider.
+ * and a Laravel 11, 12 or 13 skeleton has the config file and no provider.
  */
 it('leaves config/app.php alone when there is no BroadcastServiceProvider', function () {
     $config = "<?php return ['providers' => [\n    // App\Providers\BroadcastServiceProvider::class,\n]];";

@@ -97,10 +97,10 @@ class LightspeedInstall extends Command
     /**
      * Publish the framework's broadcasting config if the application has none.
      *
-     * A fresh Laravel 11/12 application does not ship config/broadcasting.php,
-     * it reads the framework's copy. There is nowhere to add a connection to a
-     * file that does not exist, so this is the first step and the connection
-     * step depends on it.
+     * A fresh Laravel 11, 12 or 13 application does not ship
+     * config/broadcasting.php, it reads the framework's copy. There is nowhere
+     * to add a connection to a file that does not exist, so this is the first
+     * step and the connection step depends on it.
      */
     private function installBroadcastingConfig(): void
     {
@@ -227,7 +227,7 @@ class LightspeedInstall extends Command
      * Uncomment App\Providers\BroadcastServiceProvider, for older layouts only.
      *
      * Same conditions as Laravel's enableBroadcastServiceProvider(): both files
-     * have to exist, which they do not in a Laravel 11 or 12 skeleton. The one
+     * have to exist, which they do not in a Laravel 11, 12 or 13 skeleton. The one
      * deliberate difference is that the provider file is looked for under the
      * application's base path rather than relative to the working directory,
      * so it is found when artisan is run from elsewhere.
@@ -561,9 +561,9 @@ class LightspeedInstall extends Command
     }
 
     /**
-     * The Laravel 11 body of writeEnvVariable, one method for one reason: the
-     * suite runs on Laravel 12 where the branch above always wins, and a
-     * fallback nothing can reach is a fallback nothing can test. This seam is
+     * The Laravel 11 body of writeEnvVariable, one method for one reason: on
+     * Laravel 12 and 13 the branch above always wins, and a fallback nothing
+     * can reach is a fallback nothing can test. This seam is
      * pinned byte for byte against the real Env::writeVariable in
      * tests/Unit/EnvWriterFallbackParityTest.php.
      *
