@@ -63,7 +63,10 @@ if [[ -d "$APP" ]]; then
     echo "==> Reusing the app already in ./hello-world (./install.sh --clean to start over)"
 else
     echo "==> Creating a Laravel app"
-    composer create-project laravel/laravel "$APP" "11.*" --prefer-dist --no-interaction --quiet
+    # The same framework range composer.json accepts, not one pinned line:
+    # Composer picks the newest skeleton this PHP can install, so PHP 8.3+
+    # gets Laravel 13 (which needs 8.3) and PHP 8.2 gets 12.
+    composer create-project laravel/laravel "$APP" "^11.0|^12.0|^13.0" --prefer-dist --no-interaction --quiet
 
     cd "$APP"
 
