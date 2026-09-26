@@ -9,6 +9,10 @@ contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.1] - 2026-09-25
+
 ### Added
 
 - Laravel 13, alongside 11 and 12. Laravel 13 needs PHP 8.3; the package
