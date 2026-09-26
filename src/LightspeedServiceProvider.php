@@ -109,8 +109,9 @@ class LightspeedServiceProvider extends ServiceProvider
         // Laravel 13's extend() rebinds the closure's `$this` to the
         // BroadcastManager. `$this->pusherClient()` then falls through the
         // manager's `__call` to driver(), which resolves this same closure,
-        // and it recurses until memory runs out: every artisan command and
-        // every request in the host application, dead at boot.
+        // and it recurses until memory runs out. `routes/channels.php`
+        // resolves the broadcaster at boot, so once `lightspeed:install` has
+        // run, that is every artisan command and every request, dead at boot.
         $pusherClient = $this->pusherClient(...);
 
         Broadcast::extend('lightspeed', function ($app, array $config = []) use ($pusherClient) {
