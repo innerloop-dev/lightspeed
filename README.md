@@ -182,7 +182,8 @@ Redis read, and behaves exactly as it did before this feature existed.
 ## Install
 
 PHP 8.2+ with the [Swoole](https://swoole.com) extension, Redis, a PHP Redis
-client, Laravel 11 or 12.
+client, Laravel 11, 12 or 13. Laravel 13 needs PHP 8.3, and a Lightspeed
+release after 0.1.0.
 
 No Swoole yet? It is a PHP extension, so Composer cannot install it for you:
 

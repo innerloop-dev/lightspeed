@@ -137,7 +137,7 @@ php vendor/innerloop-dev/lightspeed/tests/integration/client-event-round-trip.ph
 php vendor/innerloop-dev/lightspeed/tests/integration/connection-closed-handler.php 127.0.0.1 8000
 ```
 
-CI in this repo runs all of them plus the probes against a fresh Laravel app on every push to any branch and on every pull request, on both Laravel 11 and 12, which is what the badge means.
+CI in this repo runs all of them plus the probes against a fresh Laravel app on every push to any branch and on every pull request, on Laravel 11, 12 and 13, which is what the badge means.
 
 The fastest human check is still the [hello world example](../example): one command, then two browser tabs. It exercises presence, a message up the socket and its reply, and a broadcast from a separate process, and you can see all three happen.
 
